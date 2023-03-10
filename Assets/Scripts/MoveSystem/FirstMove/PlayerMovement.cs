@@ -2,12 +2,12 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
-
-public class PlayerMovement : MonoBehaviour
+using UnityEngine.InputSystem;
+public class PlayerMovement : SingletonMono<PlayerMovement>
 {
-    [Header("移动速度")] 
-    private float moveSpeed;
-
+    [HideInInspector]
+    public float moveSpeed;
+    [Header("移动速度")]
     public float walkSpeed;
     public float sprintSpeed;
 
@@ -28,8 +28,14 @@ public class PlayerMovement : MonoBehaviour
     [Header("地面检测")] 
     public float groundDrag;
     public float playerHeight;
+    public Vector3 boxRadius;
+    public Vector3 offsetRadius;
     public LayerMask whatIsGround;
-    private bool grounded;
+    private bool isGrounded;
+    [Header("上坡最大角度")] 
+    public float maxSlopeAngle;
+    private RaycastHit slopeHit;
+    private bool exitingSlope; //是否退出斜坡
     private float horizontalInput;
     private float verticalInput;
     private Vector3 moveDirection;
@@ -40,10 +46,13 @@ public class PlayerMovement : MonoBehaviour
     {
         walking,
         sprinting,
+        crouching,
         air
     }
-    private void Awake()
+
+    protected override void Awake()
     {
+        base.Awake();
         m_rigidbody = GetComponent<Rigidbody>();
         m_rigidbody.freezeRotation = true;
     }
@@ -55,35 +64,65 @@ public class PlayerMovement : MonoBehaviour
 
     private void Update()
     {
-        grounded = Physics.Raycast(transform.position, Vector3.down, playerHeight * 0.5f + 0.2f, whatIsGround);
+        CheckGrounded();
         MyInput();
         SpeedControl();
         StateHandler();
         CalculateDrag();
     }
+    /// <summary>
+    /// 检测是否在地面上
+    /// </summary>
+    private void CheckGrounded()
+    {
+        Collider[] hitArr = Physics.OverlapBox(transform.position+offsetRadius,boxRadius,
+            Quaternion.identity,whatIsGround);
+        if (hitArr.Length > 0)
+        {
+            isGrounded = true;
+        }
+        else
+        {
+            isGrounded = false;
+        }
+        // isGrounded = Physics.Raycast(transform.position, Vector3.down,
+        //     playerHeight * 0.5f + 0.2f, whatIsGround);
+    }
+
+    private void OnDrawGizmos()
+    {
+        Gizmos.color = Color.magenta;
+        Gizmos.DrawCube(transform.position+offsetRadius,boxRadius*2f);
+        Gizmos.DrawLine(transform.position,transform.position+Vector3.down);
+    }
 
     private void CalculateDrag()
     {
-        if (grounded)
+        if (isGrounded)
             m_rigidbody.drag = groundDrag;
         else
         {
             m_rigidbody.drag = 0;
         }
     }
+
+    
     private void FixedUpdate()
     {
         MovePlayer();
+
     }
     /// <summary>
     /// 输入监听
     /// </summary>
     private void MyInput()
     {
-        horizontalInput = Input.GetAxisRaw("Horizontal");
-        verticalInput = Input.GetAxisRaw("Vertical");
-        if (Input.GetKey(jumpKey) && readyToJump && grounded)
+        horizontalInput = InputController.Instance.PlayerMoveInput().x;
+        verticalInput = InputController.Instance.PlayerMoveInput().y;
+      
+        if (InputController.Instance.canJump && readyToJump && isGrounded)
         {
+            Debug.Log("jump sssss");
             readyToJump = false;
             Jump();
             Invoke(nameof(ResetJump),jumpCooldown);
@@ -92,16 +131,29 @@ public class PlayerMovement : MonoBehaviour
         if (Input.GetKeyDown(crouchKey))
         {
             transform.localScale = new Vector3(transform.localScale.x, crouchYScale, transform.localScale.z);
+            m_rigidbody.AddForce(Vector3.down * 5f ,ForceMode.Impulse);
+        }
+
+        if (Input.GetKeyUp(crouchKey))
+        {
+            transform.localScale = new Vector3(transform.localScale.x, startYScale, transform.localScale.z);
         }
     }
-
+    /// <summary>
+    /// 状态处理
+    /// </summary>
     private void StateHandler()
     {
-        if (grounded && Input.GetKey(sprintKey))
+        if (Input.GetKey(crouchKey))
+        {
+            state = MovementState.crouching;
+            moveSpeed = crouchSpeed;
+        }
+        else if (isGrounded && Input.GetKey(sprintKey))
         {
             state = MovementState.sprinting;
             moveSpeed = sprintSpeed;
-        }else if (grounded)
+        }else if (isGrounded)
         {
             state = MovementState.walking;
             moveSpeed = walkSpeed;
@@ -116,27 +168,50 @@ public class PlayerMovement : MonoBehaviour
     /// </summary>
     private void MovePlayer()
     {
-        moveDirection = orientation.forward * verticalInput + orientation.right * horizontalInput;
-        if(grounded)
-            m_rigidbody.AddForce(moveDirection.normalized * moveSpeed * 10f,ForceMode.Force);
-        else if(!grounded)
-            m_rigidbody.AddForce(moveDirection.normalized * moveSpeed * 10f * airMultiplier,ForceMode.Force);
+        //Debug.Log(transform.position+"trans");
+        moveDirection = (orientation.forward * verticalInput + orientation.right * horizontalInput).normalized;
+    
+        //如果在斜坡上
+        if (OnSlope() && !exitingSlope)
+        {
+            m_rigidbody.AddForce(GetSlopeMoveDirection()*moveSpeed*15f,ForceMode.Force);
+            if (m_rigidbody.velocity.y > 0)
+            {
+                m_rigidbody.AddForce(Vector3.down*50f,ForceMode.Force);
+            }
+        }
+        if(isGrounded)
+            m_rigidbody.AddForce(moveDirection * moveSpeed * 10f,ForceMode.Force);
+        else if(!isGrounded)
+            m_rigidbody.AddForce(moveDirection* moveSpeed * 10f * airMultiplier,ForceMode.Force);
+        //在斜坡上就关闭重力
+        m_rigidbody.useGravity = !OnSlope();
     }
     /// <summary>
     /// 速度限制
     /// </summary>
     private void SpeedControl()
     {
-        Vector3 flatVel = new Vector3(m_rigidbody.velocity.x, 0f, m_rigidbody.velocity.z);
-        if (flatVel.magnitude > moveSpeed)
+        if (OnSlope()&&!exitingSlope)
         {
-            Vector3 limitedVel = flatVel.normalized * moveSpeed;
-            m_rigidbody.velocity = new Vector3(limitedVel.x, m_rigidbody.velocity.y, limitedVel.z);
+            if (m_rigidbody.velocity.magnitude > moveSpeed)
+                m_rigidbody.velocity = m_rigidbody.velocity.normalized * moveSpeed;
         }
+        else
+        {
+            Vector3 flatVel = new Vector3(m_rigidbody.velocity.x, 0f, m_rigidbody.velocity.z);
+            if (flatVel.magnitude > moveSpeed)
+            {
+                Vector3 limitedVel = flatVel.normalized * moveSpeed;
+                m_rigidbody.velocity = new Vector3(limitedVel.x, m_rigidbody.velocity.y, limitedVel.z);
+            }
+        }
+        
     }
 
     private void Jump()
     {
+        exitingSlope = true;
         //m_rigidbody.velocity = new Vector3(m_rigidbody.velocity.x, 0, m_rigidbody.velocity.z);
         m_rigidbody.AddForce(transform.up * jumpForce,ForceMode.Impulse);
     }
@@ -144,5 +219,29 @@ public class PlayerMovement : MonoBehaviour
     private void ResetJump()
     {
         readyToJump = true;
+        exitingSlope = false;
+    }
+    /// <summary>
+    /// 判断是否在斜坡上
+    /// </summary>
+    /// <returns></returns>
+    private bool OnSlope()
+    {
+        if (Physics.Raycast(transform.position, Vector3.down, 
+            out slopeHit, playerHeight * 0.5f + 0.3f))
+        {
+            float angle = Vector3.Angle(Vector3.up, slopeHit.normal);
+            return angle < maxSlopeAngle && angle != 0;
+        }
+        
+        return false;
+    }
+    /// <summary>
+    /// 得到斜坡上的移动方向
+    /// </summary>
+    /// <returns></returns>
+    private Vector3 GetSlopeMoveDirection()
+    {
+        return Vector3.ProjectOnPlane(moveDirection,slopeHit.normal).normalized;
     }
 }
