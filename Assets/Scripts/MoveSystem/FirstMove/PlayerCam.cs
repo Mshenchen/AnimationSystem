@@ -21,6 +21,13 @@ public class PlayerCam : MonoBehaviour
 
     private void Update()
     {
+        FirstPersonPerspectiveControl();
+    }
+    /// <summary>
+    /// 第一人称视角控制
+    /// </summary>
+    private void FirstPersonPerspectiveControl()
+    {
         float mouseX = Input.GetAxisRaw("Mouse X") * Time.deltaTime * sensX;
         float mouseY = Input.GetAxisRaw("Mouse Y") * Time.deltaTime * sensY;
         yRotation += mouseX;
